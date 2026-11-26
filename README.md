@@ -18,7 +18,20 @@ It was built as a zero-bloat alternative when you only need precise keyboard vol
 - External monitor with DDC/CI enabled over DisplayPort, USB-C, or HDMI
 - Xcode Command Line Tools if building from source
 
-## Build and Install
+## Install with Homebrew
+
+```zsh
+brew install --cask hongry18/tap/microvol
+```
+
+Or tap first and install:
+
+```zsh
+brew tap hongry18/tap
+brew install --cask microvol
+```
+
+## Build from Source
 
 ```zsh
 git clone https://github.com/hongry18/MicroVol.git
