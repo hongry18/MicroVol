@@ -1,6 +1,6 @@
 cask "microvol" do
-  version "1.0.0"
-  sha256 "5b0eec53eb15bcdda575ab575dcd38da3e8b8ead22ce92a9e810d56cf5912af2"
+  version "1.1.0"
+  sha256 "4a7890f47354adc8f326860c405baf208e8b641e0af6ad0e15bc7feefffd28f5"
 
   url "https://github.com/hongry18/MicroVol/releases/download/v#{version}/MicroVol-arm64.zip"
   name "MicroVol"
@@ -12,10 +12,13 @@ cask "microvol" do
 
   app "MicroVol.app"
 
-  caveats <<~EOS
-    MicroVol is ad-hoc signed. If macOS blocks it on first launch, run:
-      xattr -cr /Applications/MicroVol.app
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-cr", "#{appdir}/MicroVol.app"],
+                   sudo: false
+  end
 
+  caveats <<~EOS
     MicroVol requires Accessibility permission to intercept keyboard volume keys.
     Grant access in System Settings > Privacy & Security > Accessibility.
     After upgrading, you may need to remove and re-add MicroVol in Accessibility.
