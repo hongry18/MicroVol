@@ -7,6 +7,7 @@ enum MediaKeyAction {
 }
 
 final class MediaKeyInterceptor {
+    var shouldIntercept: (() -> Bool)?
     var onMediaKey: ((MediaKeyAction) -> Void)?
 
     private var eventTap: CFMachPort?
@@ -14,6 +15,10 @@ final class MediaKeyInterceptor {
 
     var isRunning: Bool {
         eventTap != nil
+    }
+
+    deinit {
+        stop()
     }
 
     @discardableResult
@@ -72,6 +77,11 @@ final class MediaKeyInterceptor {
     }
 
     private func handle(cgEvent: CGEvent) -> Bool {
+        let relevantModifiers: CGEventFlags = [.maskAlternate, .maskCommand, .maskControl, .maskShift]
+        if !cgEvent.flags.intersection(relevantModifiers).isEmpty {
+            return false
+        }
+
         guard let nsEvent = NSEvent(cgEvent: cgEvent),
               nsEvent.type == .systemDefined,
               nsEvent.subtype.rawValue == 8 else {
@@ -83,6 +93,7 @@ final class MediaKeyInterceptor {
         let keyFlags = data1 & 0x0000FFFF
         let keyState = (keyFlags & 0xFF00) >> 8
         let isKeyDown = (keyState == 0x0A)
+        let isRepeat = (keyFlags & 0x0001) != 0
 
         let action: MediaKeyAction
         switch keyCode {
@@ -96,7 +107,14 @@ final class MediaKeyInterceptor {
             return false
         }
 
+        if let shouldIntercept = shouldIntercept, !shouldIntercept() {
+            return false
+        }
+
         if isKeyDown {
+            if action == .mute && isRepeat {
+                return true
+            }
             DispatchQueue.main.async { [weak self] in
                 self?.onMediaKey?(action)
             }

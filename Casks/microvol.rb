@@ -13,7 +13,11 @@ cask "microvol" do
   app "MicroVol.app"
 
   caveats <<~EOS
+    MicroVol is ad-hoc signed. If macOS blocks it on first launch, run:
+      xattr -cr /Applications/MicroVol.app
+
     MicroVol requires Accessibility permission to intercept keyboard volume keys.
     Grant access in System Settings > Privacy & Security > Accessibility.
+    After upgrading, you may need to remove and re-add MicroVol in Accessibility.
   EOS
 end

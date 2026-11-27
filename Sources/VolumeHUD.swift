@@ -1,5 +1,23 @@
 import Cocoa
 
+enum VolumeSymbol {
+    static func name(volume: Int?, muted: Bool) -> String {
+        guard let volume = volume else {
+            return "speaker.slash.fill"
+        }
+        let clamped = max(0, min(100, volume))
+        if muted || clamped == 0 {
+            return "speaker.slash.fill"
+        } else if clamped < 34 {
+            return "speaker.wave.1.fill"
+        } else if clamped < 67 {
+            return "speaker.wave.2.fill"
+        } else {
+            return "speaker.wave.3.fill"
+        }
+    }
+}
+
 final class VolumeHUD {
     private let panel: NSPanel
     private let titleLabel: NSTextField
@@ -9,6 +27,7 @@ final class VolumeHUD {
     private let barTrack: NSView
     private var barFillWidthConstraint: NSLayoutConstraint!
     private var hideTimer: Timer?
+    private var showGeneration: UInt64 = 0
 
     init() {
         panel = NSPanel(
@@ -53,13 +72,11 @@ final class VolumeHUD {
         barTrack = NSView()
         barTrack.translatesAutoresizingMaskIntoConstraints = false
         barTrack.wantsLayer = true
-        barTrack.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.18).cgColor
         barTrack.layer?.cornerRadius = 3
 
         barFill = NSView()
         barFill.translatesAutoresizingMaskIntoConstraints = false
         barFill.wantsLayer = true
-        barFill.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.9).cgColor
         barFill.layer?.cornerRadius = 3
         barTrack.addSubview(barFill)
 
@@ -94,6 +111,8 @@ final class VolumeHUD {
             barFill.bottomAnchor.constraint(equalTo: barTrack.bottomAnchor),
             barFillWidthConstraint
         ])
+
+        updateBarColors()
     }
 
     func show(deviceName: String, volume: Int, muted: Bool) {
@@ -101,39 +120,47 @@ final class VolumeHUD {
         titleLabel.stringValue = deviceName
         valueLabel.stringValue = muted ? "0" : "\(clamped)"
 
-        let symbolName: String
-        if muted || clamped == 0 {
-            symbolName = "speaker.slash.fill"
-        } else if clamped < 34 {
-            symbolName = "speaker.wave.1.fill"
-        } else if clamped < 67 {
-            symbolName = "speaker.wave.2.fill"
-        } else {
-            symbolName = "speaker.wave.3.fill"
-        }
+        let symbolName = VolumeSymbol.name(volume: clamped, muted: muted)
         let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .medium)
         iconView.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
 
-        let trackWidth: CGFloat = 220 - 36
+        updateBarColors()
+
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let trackWidth = barTrack.bounds.width > 0 ? barTrack.bounds.width : (panel.frame.width - 36)
         barFillWidthConstraint.constant = muted ? 0 : trackWidth * CGFloat(clamped) / 100.0
 
         positionOnActiveScreen()
 
+        showGeneration &+= 1
+        let currentGeneration = showGeneration
+
+        hideTimer?.invalidate()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            panel.animator().alphaValue = 1.0
+        }
         panel.alphaValue = 1.0
         panel.orderFrontRegardless()
 
-        hideTimer?.invalidate()
         hideTimer = Timer.scheduledTimer(withTimeInterval: 1.1, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
+            guard let self = self, self.showGeneration == currentGeneration else { return }
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.25
                 self.panel.animator().alphaValue = 0.0
             }, completionHandler: {
-                if self.panel.alphaValue == 0.0 {
+                if self.showGeneration == currentGeneration {
                     self.panel.orderOut(nil)
                 }
             })
+        }
+    }
+
+    private func updateBarColors() {
+        panel.effectiveAppearance.performAsCurrentDrawingAppearance {
+            barTrack.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.18).cgColor
+            barFill.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.9).cgColor
         }
     }
 
