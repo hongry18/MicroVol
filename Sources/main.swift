@@ -1,5 +1,6 @@
 import Cocoa
 import ApplicationServices
+import ServiceManagement
 
 private let displayReconfigurationCallback: CGDisplayReconfigurationCallBack = { _, flags, userInfo in
     guard !flags.contains(.beginConfigurationFlag),
@@ -21,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var deviceMenuItem: NSMenuItem!
     private var permissionMenuItem: NSMenuItem!
+    private var launchAtLoginMenuItem: NSMenuItem!
     private var volumeSlider: NSSlider!
     private var stepItems: [Int: NSMenuItem] = [:]
 
@@ -31,6 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var volumeBeforeMute: Int = 30
     private var stepSize: Int = 1
     private var stateGeneration: UInt64 = 0
+    private var isReadingDDCVolume: Bool = false
+    private var lastSoftwareWriteTime: Date = .distantPast
 
     private var permissionPollTimer: Timer?
     private var displayRefreshWorkItem: DispatchWorkItem?
@@ -72,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         updateStatusBarTitle()
 
         let menu = NSMenu()
@@ -115,6 +120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let refreshItem = NSMenuItem(title: "Reconnect Displays", action: #selector(reloadDisplays), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
+
+        launchAtLoginMenuItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchAtLoginMenuItem.target = self
+        launchAtLoginMenuItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        menu.addItem(launchAtLoginMenuItem)
 
         menu.addItem(.separator())
 
@@ -221,7 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startPermissionWatcher() {
         permissionPollTimer?.invalidate()
-        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             if AXIsProcessTrusted() && self.mediaKeyInterceptor.start() {
                 self.permissionPollTimer?.invalidate()
@@ -229,10 +239,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.permissionMenuItem.isHidden = true
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        permissionPollTimer = timer
     }
 
     private func syncSoftwareAudioState() {
         guard let audio = activeAudioDevice, audio.supportsSoftwareVolume else { return }
+        if Date().timeIntervalSince(lastSoftwareWriteTime) < 0.25 {
+            return
+        }
         if let vol = audioManager.getSoftwareVolume(deviceID: audio.id) {
             currentVolume = vol
             if vol > 0 {
@@ -250,6 +265,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshAudioAndDisplayState(readHardwareVolume: Bool, forceDisplayRefresh: Bool) {
         stateGeneration &+= 1
         let generation = stateGeneration
+        isReadingDDCVolume = false
 
         let audio = audioManager.defaultOutputDevice()
         activeAudioDevice = audio
@@ -323,8 +339,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if audio.supportsSoftwareVolume {
             stateGeneration &+= 1
-            if let liveVol = audioManager.getSoftwareVolume(deviceID: audio.id) {
-                currentVolume = liveVol
+            if currentVolume == nil || Date().timeIntervalSince(lastSoftwareWriteTime) > 1.0 {
+                if let liveVol = audioManager.getSoftwareVolume(deviceID: audio.id) {
+                    currentVolume = liveVol
+                }
             }
             var volume = currentVolume ?? 0
             isMuted = audioManager.isSoftwareMuted(deviceID: audio.id)
@@ -333,18 +351,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .volumeUp:
                 isMuted = false
                 volume = min(100, volume + stepSize)
+                lastSoftwareWriteTime = Date()
                 audioManager.setSoftwareVolume(deviceID: audio.id, percent: volume)
             case .volumeDown:
                 isMuted = false
                 volume = max(0, volume - stepSize)
+                lastSoftwareWriteTime = Date()
                 audioManager.setSoftwareVolume(deviceID: audio.id, percent: volume)
                 if volume == 0 {
                     audioManager.setSoftwareMute(deviceID: audio.id, muted: true)
                     isMuted = true
                 }
             case .mute:
-                isMuted.toggle()
-                audioManager.setSoftwareMute(deviceID: audio.id, muted: isMuted)
+                lastSoftwareWriteTime = Date()
+                if isMuted || volume == 0 {
+                    isMuted = false
+                    if volume == 0 {
+                        volume = max(1, volumeBeforeMute)
+                        audioManager.setSoftwareVolume(deviceID: audio.id, percent: volume)
+                    }
+                    audioManager.setSoftwareMute(deviceID: audio.id, muted: false)
+                } else {
+                    volumeBeforeMute = volume
+                    isMuted = true
+                    audioManager.setSoftwareMute(deviceID: audio.id, muted: true)
+                }
             }
 
             currentVolume = volume
@@ -359,9 +390,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let display = activeDDCDisplay else { return }
 
             guard var volume = currentVolume else {
+                guard !isReadingDDCVolume else { return }
+                isReadingDDCVolume = true
                 let generation = stateGeneration
                 ddcController.readVolume(display: display) { [weak self] reading in
-                    guard let self = self, self.stateGeneration == generation, let reading = reading else { return }
+                    guard let self = self else { return }
+                    self.isReadingDDCVolume = false
+                    guard self.stateGeneration == generation, let reading = reading else { return }
                     self.currentVolume = reading.percent
                     self.isMuted = (reading.percent == 0)
                     if reading.percent > 0 {
@@ -445,6 +480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let audio = activeAudioDevice {
             if audio.supportsSoftwareVolume {
+                lastSoftwareWriteTime = Date()
                 audioManager.setSoftwareVolume(deviceID: audio.id, percent: newVol)
                 audioManager.setSoftwareMute(deviceID: audio.id, muted: newVol == 0)
             } else if let display = activeDDCDisplay {
@@ -452,6 +488,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         updateStatusBarTitle()
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            // Ignored: system policy or unregistered bundle path
+        }
+        launchAtLoginMenuItem.state = (service.status == .enabled) ? .on : .off
     }
 
     @objc private func selectStep(_ sender: NSMenuItem) {

@@ -16,6 +16,7 @@ swiftc -O \
     -framework AudioToolbox \
     -framework IOKit \
     -framework ApplicationServices \
+    -framework ServiceManagement \
     "$ROOT_DIR/Sources/DDCController.swift" \
     "$ROOT_DIR/Sources/AudioManager.swift" \
     "$ROOT_DIR/Sources/MediaKeyInterceptor.swift" \

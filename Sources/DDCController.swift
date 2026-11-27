@@ -38,7 +38,10 @@ final class DDCController {
 
     private var cachedDisplays: [DDCDisplay] = []
     private let ddcQueue = DispatchQueue(label: "com.microvol.app.ddc", qos: .userInteractive)
-    private var pendingWriteWorkItem: DispatchWorkItem?
+    private let writeLock = NSLock()
+    private var writeGeneration: UInt64 = 0
+    private var pendingWrite: (display: DDCDisplay, percent: Int)?
+    private var isWriteLoopRunning: Bool = false
 
     func invalidateCache() {
         ddcQueue.async { [weak self] in
@@ -113,27 +116,49 @@ final class DDCController {
 
     func writeVolumeCoalesced(display: DDCDisplay, percent: Int) {
         let clamped = max(0, min(100, percent))
-        ddcQueue.async { [weak self] in
-            guard let self = self else { return }
-            self.pendingWriteWorkItem?.cancel()
+        writeLock.lock()
+        writeGeneration &+= 1
+        pendingWrite = (display, clamped)
+        let shouldStartLoop = !isWriteLoopRunning
+        if shouldStartLoop {
+            isWriteLoopRunning = true
+        }
+        writeLock.unlock()
 
-            var workItem: DispatchWorkItem!
-            workItem = DispatchWorkItem { [weak self] in
-                guard let self = self, !workItem.isCancelled else { return }
-                let maxVol = self.cachedMaxVolumeOnQueue(for: display)
-                let rawValue: Int
-                if maxVol > 0 && maxVol != 100 {
-                    rawValue = max(0, min(maxVol, Int(round(Double(clamped) * Double(maxVol) / 100.0))))
-                } else {
-                    rawValue = clamped
-                }
-                self.writeVolumeOnQueue(display: display, rawValue: rawValue, isCancelled: { workItem.isCancelled })
-                if self.pendingWriteWorkItem === workItem {
-                    self.pendingWriteWorkItem = nil
-                }
+        guard shouldStartLoop else { return }
+
+        ddcQueue.async { [weak self] in
+            self?.drainPendingWritesOnQueue()
+        }
+    }
+
+    private func drainPendingWritesOnQueue() {
+        while true {
+            writeLock.lock()
+            guard let next = pendingWrite else {
+                isWriteLoopRunning = false
+                writeLock.unlock()
+                return
             }
-            self.pendingWriteWorkItem = workItem
-            self.ddcQueue.async(execute: workItem)
+            pendingWrite = nil
+            let generation = writeGeneration
+            writeLock.unlock()
+
+            let maxVol = cachedMaxVolumeOnQueue(for: next.display)
+            let rawValue: Int
+            if maxVol > 0 && maxVol != 100 {
+                rawValue = max(0, min(maxVol, Int(round(Double(next.percent) * Double(maxVol) / 100.0))))
+            } else {
+                rawValue = next.percent
+            }
+
+            writeVolumeOnQueue(display: next.display, rawValue: rawValue) { [weak self] in
+                guard let self = self else { return true }
+                self.writeLock.lock()
+                let superseded = (self.writeGeneration != generation)
+                self.writeLock.unlock()
+                return superseded
+            }
         }
     }
 
@@ -338,11 +363,13 @@ final class DDCController {
                     }
                 }
                 if productName.isEmpty,
-                   let dispAttrs = dict["DisplayAttributes"] as? [String: Any],
-                   let prodAttrs = dispAttrs["ProductAttributes"] as? [String: Any],
-                   let name = prodAttrs["ProductName"] as? String, !name.isEmpty {
+                   let name = extractProductName(from: dict) {
                     productName = name
                 }
+            }
+
+            if productName.isEmpty {
+                productName = findProductNameInChildren(of: current)
             }
 
             if isExternal != nil && !productName.isEmpty {
@@ -360,5 +387,33 @@ final class DDCController {
         }
 
         return (productName, isExternal ?? false)
+    }
+
+    private func extractProductName(from dict: [String: Any]) -> String? {
+        if let dispAttrs = dict["DisplayAttributes"] as? [String: Any],
+           let prodAttrs = dispAttrs["ProductAttributes"] as? [String: Any],
+           let name = prodAttrs["ProductName"] as? String, !name.isEmpty {
+            return name
+        }
+        return nil
+    }
+
+    private func findProductNameInChildren(of entry: io_registry_entry_t) -> String {
+        var childIter: io_iterator_t = 0
+        guard IORegistryEntryGetChildIterator(entry, kIOServicePlane, &childIter) == KERN_SUCCESS else {
+            return ""
+        }
+        defer { IOObjectRelease(childIter) }
+
+        while case let child = IOIteratorNext(childIter), child != 0 {
+            defer { IOObjectRelease(child) }
+            var propsRef: Unmanaged<CFMutableDictionary>?
+            if IORegistryEntryCreateCFProperties(child, &propsRef, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+               let dict = propsRef?.takeRetainedValue() as? [String: Any],
+               let name = extractProductName(from: dict) {
+                return name
+            }
+        }
+        return ""
     }
 }
