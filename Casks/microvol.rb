@@ -1,6 +1,6 @@
 cask "microvol" do
-  version "1.1.0"
-  sha256 "4a7890f47354adc8f326860c405baf208e8b641e0af6ad0e15bc7feefffd28f5"
+  version "1.1.1"
+  sha256 "47393bcfceb4f6dd506cfc0258dd0eabf4b904edd8b5f78fc2eb364a349e27df"
 
   url "https://github.com/hongry18/MicroVol/releases/download/v#{version}/MicroVol-arm64.zip"
   name "MicroVol"
