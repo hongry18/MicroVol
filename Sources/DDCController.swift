@@ -199,7 +199,7 @@ final class DDCController {
                 return (disp, reading)
             }
         }
-        return (nil, nil)
+        return (cachedDisplays.first, nil)
     }
 
     private func readVolumeOnQueue(display: DDCDisplay) -> DDCVolumeReading? {
@@ -211,17 +211,29 @@ final class DDCController {
         var request: [UInt8] = [0x82, 0x01, Self.vcpAudioVolume, 0x00]
         request[3] = checksum(seed: 0x6E ^ 0x51, payload: request[0..<3])
 
-        for _ in 0..<2 {
-            let wkr = request.withUnsafeBytes { buf -> IOReturn in
-                guard let base = buf.baseAddress else { return kIOReturnError }
-                return writeFn(display.service, 0x37, 0x51, base, UInt32(buf.count))
+        for _ in 0..<4 {
+            var writeOK = false
+            // Apple Silicon IOAVServiceWriteI2C can return KERN_SUCCESS on a wake-up
+            // frame that the monitor replies to with a DDC NULL message (6E 80 BE).
+            // Sending the request twice with a short gap matches Arm64DDC/MonitorControl.
+            for w in 0..<2 {
+                let wkr = request.withUnsafeBytes { buf -> IOReturn in
+                    guard let base = buf.baseAddress else { return kIOReturnError }
+                    return writeFn(display.service, 0x37, 0x51, base, UInt32(buf.count))
+                }
+                if wkr == KERN_SUCCESS {
+                    writeOK = true
+                }
+                if w == 0 {
+                    usleep(10_000)
+                }
             }
-            guard wkr == KERN_SUCCESS else {
+            guard writeOK else {
                 usleep(20_000)
                 continue
             }
 
-            usleep(40_000)
+            usleep(50_000)
 
             var reply = [UInt8](repeating: 0, count: 12)
             let rkr = reply.withUnsafeMutableBytes { buf -> IOReturn in
@@ -235,13 +247,13 @@ final class DDCController {
                   reply[2] == 0x02,
                   reply[3] == 0x00,
                   reply[4] == Self.vcpAudioVolume else {
-                usleep(20_000)
+                usleep(30_000)
                 continue
             }
 
             let expectedChecksum = checksum(seed: 0x50, payload: reply[0..<10])
             guard reply[10] == expectedChecksum else {
-                usleep(20_000)
+                usleep(30_000)
                 continue
             }
 
@@ -267,17 +279,16 @@ final class DDCController {
         var packet: [UInt8] = [0x84, 0x03, Self.vcpAudioVolume, hi, lo, 0x00]
         packet[5] = checksum(seed: 0x6E ^ 0x51, payload: packet[0..<5])
 
+        // Apple Silicon IOAVServiceWriteI2C requires sending the packet twice
+        // for reliable DDC delivery on many external monitors (e.g. LG).
         for attempt in 0..<2 {
             if isCancelled() { return }
-            let kr = packet.withUnsafeBytes { buf -> IOReturn in
+            _ = packet.withUnsafeBytes { buf -> IOReturn in
                 guard let base = buf.baseAddress else { return kIOReturnError }
                 return writeFn(display.service, 0x37, 0x51, base, UInt32(buf.count))
             }
-            if kr == KERN_SUCCESS {
-                return
-            }
             if attempt == 0 {
-                usleep(12_000)
+                usleep(10_000)
             }
         }
     }
